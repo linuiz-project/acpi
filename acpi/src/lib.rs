@@ -49,7 +49,10 @@
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(feature = "allocator_api", feature(allocator_api, ptr_as_uninit))]
+#![cfg_attr(
+    feature = "allocator_api",
+    feature(allocator_api, ptr_as_uninit, nonnull_slice_from_raw_parts, slice_ptr_get)
+)]
 
 #[cfg_attr(test, macro_use)]
 #[cfg(test)]
@@ -291,9 +294,9 @@ where
     /// first things you should usually do with an `AcpiTables`, and allows to collect helpful information about
     /// the platform from the ACPI tables.
     #[cfg(feature = "allocator_api")]
-    pub fn platform_info_in<'a, A>(&'a self, allocator: &'a A) -> AcpiResult<PlatformInfo<A>>
+    pub fn platform_info_in<A>(&self, allocator: A) -> AcpiResult<PlatformInfo<A>>
     where
-        A: core::alloc::Allocator,
+        A: core::alloc::Allocator + Copy
     {
         PlatformInfo::new_in(self, allocator)
     }

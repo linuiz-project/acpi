@@ -13,24 +13,25 @@ use core::{alloc::Allocator, mem, slice};
 /// address of the start of that device function's configuration space (each function has 4096
 /// bytes of configuration space in PCIe).
 #[derive(Debug)]
-pub struct PciConfigRegions<'a, A>
+pub struct PciConfigRegions<A>
 where
     A: Allocator,
 {
-    regions: ManagedSlice<'a, McfgEntry, A>,
+    regions: ManagedSlice<McfgEntry, A>,
 }
 
-impl<'a, A> PciConfigRegions<'a, A>
+impl<A> PciConfigRegions<A>
 where
     A: Allocator,
 {
-    pub fn new<H>(tables: &AcpiTables<H>, allocator: &'a A) -> crate::AcpiResult<Self>
+    pub fn new<H>(tables: &AcpiTables<H>, allocator: A) -> crate::AcpiResult<Self>
     where
         H: AcpiHandler,
     {
         let mcfg = tables.find_table::<Mcfg>()?;
         let mcfg_entries = mcfg.entries();
-        let mut regions = ManagedSlice::new_in(mcfg_entries.len(), allocator)?;
+        let mut regions = ManagedSlice::new_in(mcfg_entries.len(), McfgEntry::default(), allocator)
+            .map_err(|_| crate::AcpiError::AllocError)?;
         regions.copy_from_slice(mcfg_entries);
 
         Ok(PciConfigRegions { regions })
@@ -93,7 +94,7 @@ impl core::fmt::Debug for Mcfg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C, packed)]
 pub struct McfgEntry {
     base_address: u64,

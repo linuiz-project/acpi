@@ -50,12 +50,12 @@ unsafe impl AcpiTable for Madt {
 
 impl Madt {
     #[cfg(feature = "allocator_api")]
-    pub fn parse_interrupt_model_in<'a, A>(
+    pub fn parse_interrupt_model_in<A>(
         &self,
-        allocator: &'a A,
-    ) -> AcpiResult<(InterruptModel<'a, A>, Option<ProcessorInfo<'a, A>>)>
+        allocator: A,
+    ) -> AcpiResult<(InterruptModel<A>, Option<ProcessorInfo<A>>)>
     where
-        A: core::alloc::Allocator,
+        A: core::alloc::Allocator + Copy,
     {
         /*
          * We first do a pass through the MADT to determine which interrupt model is being used.
@@ -95,12 +95,9 @@ impl Madt {
     }
 
     #[cfg(feature = "allocator_api")]
-    fn parse_apic_model_in<'a, A>(
-        &self,
-        allocator: &'a A,
-    ) -> AcpiResult<(InterruptModel<'a, A>, Option<ProcessorInfo<'a, A>>)>
+    fn parse_apic_model_in<A>(&self, allocator: A) -> AcpiResult<(InterruptModel<A>, Option<ProcessorInfo<A>>)>
     where
-        A: core::alloc::Allocator,
+        A: core::alloc::Allocator + Copy,
     {
         use crate::{
             platform::{
@@ -138,12 +135,51 @@ impl Madt {
             }
         }
 
-        let mut io_apics = crate::ManagedSlice::new_in(io_apic_count, allocator)?;
-        let mut interrupt_source_overrides = crate::ManagedSlice::new_in(iso_count, allocator)?;
-        let mut nmi_sources = crate::ManagedSlice::new_in(nmi_source_count, allocator)?;
-        let mut local_apic_nmi_lines = crate::ManagedSlice::new_in(local_nmi_line_count, allocator)?;
-        let mut application_processors =
-            crate::ManagedSlice::new_in(processor_count.saturating_sub(1), allocator)?; // Subtract one for the BSP
+        let mut io_apics = crate::ManagedSlice::new_in(
+            io_apic_count,
+            IoApic { id: 0, address: 0, global_system_interrupt_base: 0 },
+            allocator,
+        )
+        .map_err(|_| AcpiError::AllocError)?;
+
+        let mut interrupt_source_overrides = crate::ManagedSlice::new_in(
+            iso_count,
+            InterruptSourceOverride {
+                isa_source: 0,
+                global_system_interrupt: 0,
+                polarity: Polarity::SameAsBus,
+                trigger_mode: TriggerMode::SameAsBus,
+            },
+            allocator,
+        )
+        .map_err(|_| AcpiError::AllocError)?;
+
+        let mut nmi_sources = crate::ManagedSlice::new_in(
+            nmi_source_count,
+            NmiSource {
+                global_system_interrupt: 0,
+                polarity: Polarity::SameAsBus,
+                trigger_mode: TriggerMode::SameAsBus,
+            },
+            allocator,
+        )
+        .map_err(|_| AcpiError::AllocError)?;
+
+        let mut local_apic_nmi_lines = crate::ManagedSlice::new_in(
+            local_nmi_line_count,
+            NmiLine { processor: NmiProcessor::All, line: LocalInterruptLine::Lint0 },
+            allocator,
+        )
+        .map_err(|_| AcpiError::AllocError)?;
+
+        let mut application_processors = crate::ManagedSlice::new_in(
+            // Less one for the BSP.
+            processor_count.saturating_sub(1),
+            Processor { processor_uid: 0, local_apic_id: 0, state: ProcessorState::Disabled, is_ap: true },
+            allocator,
+        )
+        .map_err(|_| AcpiError::AllocError)?;
+
         let mut boot_processor = None;
 
         io_apic_count = 0;
