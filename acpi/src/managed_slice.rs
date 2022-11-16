@@ -1,5 +1,5 @@
 use core::{
-    alloc::{self, AllocError, Layout},
+    alloc::{self, AllocError, Allocator, Layout},
     mem::MaybeUninit,
     ptr::NonNull,
 };
@@ -9,15 +9,23 @@ use core::{
 #[derive(Debug)]
 pub struct ManagedSlice<T, A>
 where
-    A: alloc::Allocator,
+    A: Allocator,
 {
     memory: NonNull<[T]>,
     allocator: A,
 }
 
+// Safety: If `T` is `Send`, this type can be as well.
+unsafe impl<T, A> Send for ManagedSlice<T, A>
+where
+    T: Send,
+    A: Allocator,
+{
+}
+
 impl<T, A> ManagedSlice<T, A>
 where
-    A: alloc::Allocator,
+    A: Allocator,
 {
     pub fn new_uninit_in(len: usize, allocator: A) -> Result<ManagedSlice<MaybeUninit<T>, A>, AllocError> {
         let layout = Layout::array::<T>(len).map_err(|_| AllocError)?;
@@ -30,7 +38,7 @@ where
 
 impl<T: Copy, A> ManagedSlice<T, A>
 where
-    A: alloc::Allocator,
+    A: Allocator,
 {
     /// Attempts to allocate a new `&mut [T]` in the given allocator.
     pub fn new_in(len: usize, value: T, allocator: A) -> Result<Self, AllocError> {
@@ -49,7 +57,7 @@ where
 
 impl<T, A> Drop for ManagedSlice<T, A>
 where
-    A: alloc::Allocator,
+    A: Allocator,
 {
     fn drop(&mut self) {
         let ptr = self.memory.as_non_null_ptr().cast();
@@ -62,7 +70,7 @@ where
 
 impl<T, A> core::ops::Deref for ManagedSlice<T, A>
 where
-    A: alloc::Allocator,
+    A: Allocator,
 {
     type Target = [T];
 
@@ -74,7 +82,7 @@ where
 
 impl<T, A> core::ops::DerefMut for ManagedSlice<T, A>
 where
-    A: alloc::Allocator,
+    A: Allocator,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: Type always initializes memory to a valid T.
