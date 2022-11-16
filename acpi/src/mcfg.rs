@@ -1,11 +1,8 @@
 use crate::{
     sdt::{SdtHeader, Signature},
-    AcpiHandler,
     AcpiTable,
-    AcpiTables,
-    ManagedSlice,
 };
-use core::{alloc::Allocator, mem, slice};
+use core::{mem, slice};
 
 /// Describes a set of regions of physical memory used to access the PCIe configuration space. A
 /// region is created for each entry in the MCFG. Given the segment group, bus, device number, and
@@ -13,28 +10,30 @@ use core::{alloc::Allocator, mem, slice};
 /// address of the start of that device function's configuration space (each function has 4096
 /// bytes of configuration space in PCIe).
 #[derive(Debug)]
+#[cfg(feature = "allocator_api")]
 pub struct PciConfigRegions<A>
 where
-    A: Allocator,
+    A: core::alloc::Allocator,
 {
-    regions: ManagedSlice<McfgEntry, A>,
+    regions: crate::ManagedSlice<McfgEntry, A>,
 }
 
 impl<A> PciConfigRegions<A>
 where
-    A: Allocator,
+    A: core::alloc::Allocator,
 {
-    pub fn new<H>(tables: &AcpiTables<H>, allocator: A) -> crate::AcpiResult<Self>
+    pub fn new<H>(tables: &crate::AcpiTables<H>, allocator: A) -> crate::AcpiResult<Self>
     where
-        H: AcpiHandler,
+        H: crate::AcpiHandler,
     {
         let mcfg = tables.find_table::<Mcfg>()?;
         let mcfg_entries = mcfg.entries();
-        let mut regions = ManagedSlice::new_in(mcfg_entries.len(), McfgEntry::default(), allocator)
+        let mut regions = crate::ManagedSlice::new_in(mcfg_entries.len(), McfgEntry::default(), allocator)
             .map_err(|_| crate::AcpiError::AllocError)?;
+
         regions.copy_from_slice(mcfg_entries);
 
-        Ok(PciConfigRegions { regions })
+        Ok(Self { regions })
     }
 
     /// Get the physical address of the start of the configuration space for a given PCIe device
@@ -55,6 +54,40 @@ where
                     | (u64::from(function) << 12)),
         )
     }
+
+    /// Returns an iterator providing information about the system's present PCI busses.
+    /// This is roughly equivalent to manually iterating the system's MCFG table.
+    pub fn iter(&self) -> PciConfigEntryIterator {
+        PciConfigEntryIterator { entries: &self.regions, index: 0 }
+    }
+}
+
+/// Configuration entry describing a valid bus range for the given PCI segment group.
+pub struct PciConfigEntry {
+    pub segment_group: u16,
+    pub bus_range: core::ops::RangeInclusive<u8>,
+    pub physical_address: usize,
+}
+
+/// Iterator providing a [`PciConfigEntry`] for all of the valid bus ranges on the system.
+pub struct PciConfigEntryIterator<'a> {
+    entries: &'a [McfgEntry],
+    index: usize,
+}
+
+impl Iterator for PciConfigEntryIterator<'_> {
+    type Item = PciConfigEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.entries.get(self.index)?;
+        self.index += 1;
+
+        Some(PciConfigEntry {
+            segment_group: entry.pci_segment_group,
+            bus_range: entry.bus_number_start..=entry.bus_number_end,
+            physical_address: entry.base_address as usize,
+        })
+    }
 }
 
 #[repr(C, packed)]
@@ -74,6 +107,8 @@ unsafe impl AcpiTable for Mcfg {
 }
 
 impl Mcfg {
+    /// Returns a slice containing each of the entries in the MCFG table. Where possible, `PlatformInfo.interrupt_model` should
+    /// be enumerated instead.
     fn entries(&self) -> &[McfgEntry] {
         let length = self.header.length as usize - mem::size_of::<Mcfg>();
 
