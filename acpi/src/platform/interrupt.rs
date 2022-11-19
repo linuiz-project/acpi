@@ -1,4 +1,4 @@
-use crate::ManagedSlice;
+use alloc::vec::Vec;
 use core::alloc::Allocator;
 
 #[derive(Debug, Clone, Copy)]
@@ -82,10 +82,10 @@ where
     A: Allocator,
 {
     pub local_apic_address: u64,
-    pub io_apics: ManagedSlice<IoApic, A>,
-    pub local_apic_nmi_lines: ManagedSlice<NmiLine, A>,
-    pub interrupt_source_overrides: ManagedSlice<InterruptSourceOverride, A>,
-    pub nmi_sources: ManagedSlice<NmiSource, A>,
+    pub io_apics: Vec<IoApic, A>,
+    pub local_apic_nmi_lines: Vec<NmiLine, A>,
+    pub interrupt_source_overrides: Vec<InterruptSourceOverride, A>,
+    pub nmi_sources: Vec<NmiSource, A>,
 
     /// If this field is set, you must remap and mask all the lines of the legacy PIC, even if
     /// you choose to use the APIC. It's recommended that you do this even if ACPI does not
@@ -99,10 +99,10 @@ where
 {
     pub(crate) fn new(
         local_apic_address: u64,
-        io_apics: ManagedSlice<IoApic, A>,
-        local_apic_nmi_lines: ManagedSlice<NmiLine, A>,
-        interrupt_source_overrides: ManagedSlice<InterruptSourceOverride, A>,
-        nmi_sources: ManagedSlice<NmiSource, A>,
+        io_apics: Vec<IoApic, A>,
+        local_apic_nmi_lines: Vec<NmiLine, A>,
+        interrupt_source_overrides: Vec<InterruptSourceOverride, A>,
+        nmi_sources: Vec<NmiSource, A>,
         also_has_legacy_pics: bool,
     ) -> Self {
         Self {

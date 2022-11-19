@@ -1,5 +1,5 @@
 use core::{
-    alloc::{self, AllocError, Allocator, Layout},
+    alloc::{AllocError, Allocator, Layout},
     mem::MaybeUninit,
     ptr::NonNull,
 };

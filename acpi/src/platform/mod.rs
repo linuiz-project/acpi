@@ -1,15 +1,6 @@
 pub mod interrupt;
 
-use crate::{
-    address::GenericAddress,
-    fadt::Fadt,
-    madt::Madt,
-    AcpiError,
-    AcpiHandler,
-    AcpiTables,
-    ManagedSlice,
-    PowerProfile,
-};
+use crate::{address::GenericAddress, fadt::Fadt, madt::Madt, AcpiError, AcpiHandler, AcpiTables, PowerProfile};
 use core::alloc::Allocator;
 use interrupt::InterruptModel;
 
@@ -51,14 +42,14 @@ where
 {
     pub boot_processor: Processor,
     /// Application processors should be brought up in the order they're defined in this list.
-    pub application_processors: ManagedSlice<Processor, A>,
+    pub application_processors: alloc::vec::Vec<Processor, A>,
 }
 
 impl<A> ProcessorInfo<A>
 where
     A: Allocator,
 {
-    pub(crate) fn new(boot_processor: Processor, application_processors: ManagedSlice< Processor, A>) -> Self {
+    pub(crate) fn new(boot_processor: Processor, application_processors: alloc::vec::Vec<Processor, A>) -> Self {
         Self { boot_processor, application_processors }
     }
 }

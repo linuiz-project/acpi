@@ -76,6 +76,9 @@ pub use crate::platform::{interrupt::InterruptModel, PlatformInfo};
 #[cfg(feature = "allocator_api")]
 pub mod platform;
 
+#[cfg(feature = "allocator_api")]
+extern crate alloc;
+
 pub use crate::{fadt::PowerProfile, hpet::HpetInfo, madt::MadtError, mcfg::PciConfigRegions};
 pub use rsdp::{
     handler::{AcpiHandler, PhysicalMapping},
@@ -296,7 +299,7 @@ where
     #[cfg(feature = "allocator_api")]
     pub fn platform_info_in<A>(&self, allocator: A) -> AcpiResult<PlatformInfo<A>>
     where
-        A: core::alloc::Allocator + Copy
+        A: core::alloc::Allocator + Copy,
     {
         PlatformInfo::new_in(self, allocator)
     }

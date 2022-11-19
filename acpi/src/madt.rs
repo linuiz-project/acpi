@@ -115,81 +115,83 @@ impl Madt {
             },
             AcpiError,
         };
+        use alloc::vec::Vec;
 
         let mut local_apic_address = self.local_apic_address as u64;
-        let mut io_apic_count = 0;
-        let mut iso_count = 0;
-        let mut nmi_source_count = 0;
-        let mut local_nmi_line_count = 0;
-        let mut processor_count = 0usize;
+
+        let mut boot_processor = None;
+        let mut io_apics = Vec::new_in(allocator);
+        let mut interrupt_source_overrides = Vec::new_in(allocator);
+        let mut nmi_sources = Vec::new_in(allocator);
+        let mut local_apic_nmi_lines = Vec::new_in(allocator);
+        let mut application_processors = Vec::new_in(allocator);
 
         // Do a pass over the entries so we know how much space we should reserve in the vectors
         for entry in self.entries() {
             match entry {
-                MadtEntry::IoApic(_) => io_apic_count += 1,
-                MadtEntry::InterruptSourceOverride(_) => iso_count += 1,
-                MadtEntry::NmiSource(_) => nmi_source_count += 1,
-                MadtEntry::LocalApicNmi(_) => local_nmi_line_count += 1,
-                MadtEntry::LocalApic(_) => processor_count += 1,
-                _ => (),
-            }
-        }
+                MadtEntry::LocalApicAddressOverride(entry) => local_apic_address = entry.local_apic_address,
 
-        let mut io_apics = crate::ManagedSlice::new_in(
-            io_apic_count,
-            IoApic { id: 0, address: 0, global_system_interrupt_base: 0 },
-            allocator,
-        )
-        .map_err(|_| AcpiError::AllocError)?;
+                MadtEntry::IoApic(entry) => io_apics.push(IoApic {
+                    id: entry.io_apic_id,
+                    address: entry.io_apic_address,
+                    global_system_interrupt_base: entry.global_system_interrupt_base,
+                }),
 
-        let mut interrupt_source_overrides = crate::ManagedSlice::new_in(
-            iso_count,
-            InterruptSourceOverride {
-                isa_source: 0,
-                global_system_interrupt: 0,
-                polarity: Polarity::SameAsBus,
-                trigger_mode: TriggerMode::SameAsBus,
-            },
-            allocator,
-        )
-        .map_err(|_| AcpiError::AllocError)?;
+                MadtEntry::InterruptSourceOverride(entry) => {
+                    if entry.bus != 0 {
+                        return Err(AcpiError::InvalidMadt(MadtError::InterruptOverrideEntryHasInvalidBus));
+                    }
 
-        let mut nmi_sources = crate::ManagedSlice::new_in(
-            nmi_source_count,
-            NmiSource {
-                global_system_interrupt: 0,
-                polarity: Polarity::SameAsBus,
-                trigger_mode: TriggerMode::SameAsBus,
-            },
-            allocator,
-        )
-        .map_err(|_| AcpiError::AllocError)?;
+                    let (polarity, trigger_mode) = parse_mps_inti_flags(entry.flags)?;
 
-        let mut local_apic_nmi_lines = crate::ManagedSlice::new_in(
-            local_nmi_line_count,
-            NmiLine { processor: NmiProcessor::All, line: LocalInterruptLine::Lint0 },
-            allocator,
-        )
-        .map_err(|_| AcpiError::AllocError)?;
+                    interrupt_source_overrides.push(InterruptSourceOverride {
+                        isa_source: entry.irq,
+                        global_system_interrupt: entry.global_system_interrupt,
+                        polarity,
+                        trigger_mode,
+                    });
+                }
 
-        let mut application_processors = crate::ManagedSlice::new_in(
-            // Less one for the BSP.
-            processor_count.saturating_sub(1),
-            Processor { processor_uid: 0, local_apic_id: 0, state: ProcessorState::Disabled, is_ap: true },
-            allocator,
-        )
-        .map_err(|_| AcpiError::AllocError)?;
+                MadtEntry::NmiSource(entry) => {
+                    let (polarity, trigger_mode) = parse_mps_inti_flags(entry.flags)?;
 
-        let mut boot_processor = None;
+                    nmi_sources.push(NmiSource {
+                        global_system_interrupt: entry.global_system_interrupt,
+                        polarity,
+                        trigger_mode,
+                    });
+                }
 
-        io_apic_count = 0;
-        iso_count = 0;
-        nmi_source_count = 0;
-        local_nmi_line_count = 0;
-        processor_count = 0;
+                MadtEntry::LocalApicNmi(entry) => {
+                    local_apic_nmi_lines.push(NmiLine {
+                        processor: if entry.processor_id == 0xff {
+                            NmiProcessor::All
+                        } else {
+                            NmiProcessor::ProcessorUid(entry.processor_id as u32)
+                        },
+                        line: match entry.nmi_line {
+                            0 => LocalInterruptLine::Lint0,
+                            1 => LocalInterruptLine::Lint1,
+                            _ => return Err(AcpiError::InvalidMadt(MadtError::InvalidLocalNmiLine)),
+                        },
+                    });
+                }
 
-        for entry in self.entries() {
-            match entry {
+                MadtEntry::X2ApicNmi(entry) => {
+                    local_apic_nmi_lines.push(NmiLine {
+                        processor: if entry.processor_uid == 0xffffffff {
+                            NmiProcessor::All
+                        } else {
+                            NmiProcessor::ProcessorUid(entry.processor_uid)
+                        },
+                        line: match entry.nmi_line {
+                            0 => LocalInterruptLine::Lint0,
+                            1 => LocalInterruptLine::Lint1,
+                            _ => return Err(AcpiError::InvalidMadt(MadtError::InvalidLocalNmiLine)),
+                        },
+                    });
+                }
+
                 MadtEntry::LocalApic(entry) => {
                     /*
                      * The first processor is the BSP. Subsequent ones are APs. If we haven't found
@@ -212,8 +214,7 @@ impl Madt {
                     };
 
                     if is_ap {
-                        application_processors[processor_count] = processor;
-                        processor_count += 1;
+                        application_processors.push(processor);
                     } else {
                         boot_processor = Some(processor);
                     }
@@ -237,87 +238,18 @@ impl Madt {
                     };
 
                     if is_ap {
-                        application_processors[processor_count] = processor;
-                        processor_count += 1;
+                        application_processors.push(processor);
                     } else {
                         boot_processor = Some(processor);
                     }
                 }
 
-                MadtEntry::IoApic(entry) => {
-                    io_apics[io_apic_count] = IoApic {
-                        id: entry.io_apic_id,
-                        address: entry.io_apic_address,
-                        global_system_interrupt_base: entry.global_system_interrupt_base,
-                    };
-                    io_apic_count += 1;
-                }
-
-                MadtEntry::InterruptSourceOverride(entry) => {
-                    if entry.bus != 0 {
-                        return Err(AcpiError::InvalidMadt(MadtError::InterruptOverrideEntryHasInvalidBus));
+                #[allow(unused_variables)]
+                entry => {
+                    #[cfg(feature = "logging")]
+                    {
+                        log::trace!("Unhandled MADT entry: {:?}", entry);
                     }
-
-                    let (polarity, trigger_mode) = parse_mps_inti_flags(entry.flags)?;
-
-                    interrupt_source_overrides[iso_count] = InterruptSourceOverride {
-                        isa_source: entry.irq,
-                        global_system_interrupt: entry.global_system_interrupt,
-                        polarity,
-                        trigger_mode,
-                    };
-                    iso_count += 1;
-                }
-
-                MadtEntry::NmiSource(entry) => {
-                    let (polarity, trigger_mode) = parse_mps_inti_flags(entry.flags)?;
-
-                    nmi_sources[nmi_source_count] = NmiSource {
-                        global_system_interrupt: entry.global_system_interrupt,
-                        polarity,
-                        trigger_mode,
-                    };
-                    nmi_source_count += 1;
-                }
-
-                MadtEntry::LocalApicNmi(entry) => {
-                    local_apic_nmi_lines[local_nmi_line_count] = NmiLine {
-                        processor: if entry.processor_id == 0xff {
-                            NmiProcessor::All
-                        } else {
-                            NmiProcessor::ProcessorUid(entry.processor_id as u32)
-                        },
-                        line: match entry.nmi_line {
-                            0 => LocalInterruptLine::Lint0,
-                            1 => LocalInterruptLine::Lint1,
-                            _ => return Err(AcpiError::InvalidMadt(MadtError::InvalidLocalNmiLine)),
-                        },
-                    };
-                    local_nmi_line_count += 1;
-                }
-
-                MadtEntry::X2ApicNmi(entry) => {
-                    local_apic_nmi_lines[local_nmi_line_count] = NmiLine {
-                        processor: if entry.processor_uid == 0xffffffff {
-                            NmiProcessor::All
-                        } else {
-                            NmiProcessor::ProcessorUid(entry.processor_uid)
-                        },
-                        line: match entry.nmi_line {
-                            0 => LocalInterruptLine::Lint0,
-                            1 => LocalInterruptLine::Lint1,
-                            _ => return Err(AcpiError::InvalidMadt(MadtError::InvalidLocalNmiLine)),
-                        },
-                    };
-                    local_nmi_line_count += 1;
-                }
-
-                MadtEntry::LocalApicAddressOverride(entry) => {
-                    local_apic_address = entry.local_apic_address;
-                }
-
-                _ => {
-                    return Err(AcpiError::InvalidMadt(MadtError::UnexpectedEntry));
                 }
             }
         }
