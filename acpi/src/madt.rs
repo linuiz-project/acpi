@@ -120,10 +120,10 @@ impl Madt {
         let mut local_apic_address = self.local_apic_address as u64;
 
         let mut boot_processor = None;
-        let mut io_apics = Vec::new_in(allocator);
-        let mut interrupt_source_overrides = Vec::new_in(allocator);
-        let mut nmi_sources = Vec::new_in(allocator);
-        let mut local_apic_nmi_lines = Vec::new_in(allocator);
+        let mut io_apics = Vec::new_in(allocator.clone());
+        let mut interrupt_source_overrides = Vec::new_in(allocator.clone());
+        let mut nmi_sources = Vec::new_in(allocator.clone());
+        let mut local_apic_nmi_lines = Vec::new_in(allocator.clone());
         let mut application_processors = Vec::new_in(allocator);
 
         // Do a pass over the entries so we know how much space we should reserve in the vectors

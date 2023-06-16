@@ -49,10 +49,7 @@
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![cfg_attr(
-    feature = "allocator_api",
-    feature(allocator_api, ptr_as_uninit, nonnull_slice_from_raw_parts, slice_ptr_get)
-)]
+#![cfg_attr(feature = "allocator_api", feature(allocator_api, ptr_as_uninit, slice_ptr_get))]
 
 #[cfg_attr(test, macro_use)]
 #[cfg(test)]
