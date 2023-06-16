@@ -43,14 +43,13 @@ where
     pub fn new_in(len: usize, value: T, allocator: A) -> Result<Self, AllocError> {
         let layout = Layout::array::<T>(len).map_err(|_| AllocError)?;
 
-        allocator
-            .allocate(layout)
-            .map(|ptr| unsafe { NonNull::slice_from_raw_parts(ptr.as_non_null_ptr().as_ptr().cast::<T>(), len) })
-            .map(|memory| {
+        allocator.allocate(layout).map(|ptr| NonNull::slice_from_raw_parts(ptr.as_non_null_ptr().cast(), len)).map(
+            |memory| {
                 // We must properly initialize the contents of the slice to avoid returning `ManagedSlice<MaybeUninit<T>>`.
                 unsafe { memory.as_uninit_slice_mut().fill(core::mem::MaybeUninit::new(value)) };
                 Self { memory, allocator }
-            })
+            },
+        )
     }
 }
 
