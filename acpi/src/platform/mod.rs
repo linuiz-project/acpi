@@ -93,7 +93,7 @@ where
 
 impl<A> PlatformInfo<A>
 where
-    A: Allocator + Copy,
+    A: Allocator + Clone,
 {
     pub fn new_in<H>(tables: &AcpiTables<H>, allocator: A) -> crate::AcpiResult<Self>
     where

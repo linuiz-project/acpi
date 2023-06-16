@@ -4,11 +4,10 @@
 //! hardware-independent way.
 //!
 //! ### Using the library
-//! To use the library, you should create an instance of this type using `AmlContext::new()`, and
-//! then pass it tables containing AML (probably from the `acpi` crate), which you've mapped into
-//! the virtual address space. This will parse the table, populating the namespace with objects
-//! encoded by the AML. After this, you may unmap the memory the table was mapped into - all the
-//! information needed will be extracted and allocated on the heap.
+//! To use the library, you should create an `AmlContext` using `AmlContext::new()`, and then pass it tables
+//! containing AML (probably from the `acpi` crate), which you've mapped into the virtual address space. This will
+//! parse the table, populating the namespace with objects encoded by the AML. After this, you may unmap the memory
+//! the table was mapped into - all the information needed will be extracted and allocated on the heap.
 //!
 //! You can then access specific objects by name like so: e.g.
 //! ```ignore
@@ -36,7 +35,7 @@
 //! combinator patterns to express the parse.
 
 #![no_std]
-#![feature(decl_macro, type_ascription, box_syntax, bool_to_option)]
+#![feature(decl_macro)]
 
 extern crate alloc;
 
@@ -797,6 +796,9 @@ pub enum AmlError {
     TypeCannotBeSliced(AmlType),
     TypeCannotBeWrittenToBufferField(AmlType),
     BufferFieldIndexesOutOfBounds,
+
+    /// Unimplemented functionality - return error rather than abort
+    Unimplemented,
 }
 
 #[cfg(test)]

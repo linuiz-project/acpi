@@ -286,7 +286,7 @@ impl AmlValue {
                 let bytes = bytes.lock();
                 let bytes = if bytes.len() > 8 { &bytes[0..8] } else { &bytes[..] };
 
-                Ok(bytes.iter().rev().fold(0: u64, |mut i, &popped| {
+                Ok(bytes.iter().rev().fold(0u64, |mut i, &popped| {
                     i <<= 8;
                     i += popped as u64;
                     i
@@ -516,12 +516,29 @@ impl AmlValue {
 
             let bitslice = inner_data.view_bits::<bitvec::order::Lsb0>();
             let bits = &bitslice[offset..(offset + length)];
+
             if length > 64 {
-                Ok(AmlValue::Buffer(Arc::new(spinning_top::Spinlock::new(bits.as_raw_slice().to_vec()))))
+                let mut bitvec = bits.to_bitvec();
+                bitvec.set_uninitialized(false);
+                Ok(AmlValue::Buffer(Arc::new(spinning_top::Spinlock::new(bitvec.into_vec()))))
+            } else if length > 32 {
+                /*
+                 * TODO: this is a pretty gross hack to work around a weird limitation with the `bitvec` crate on
+                 * 32-bit platforms. For reasons beyond me right now, it can't operate on a `u64` on a 32-bit
+                 * platform, so we manually extract two `u32`s and stick them together. In the future, we should
+                 * definitely have a closer look at what `bitvec` is doing and see if we can fix this code, or
+                 * replace it with a different crate. This should hold everything vaguely together until we have
+                 * time to do that.
+                 */
+                let mut upper = 0u32;
+                let mut lower = 0u32;
+                lower.view_bits_mut::<bitvec::order::Lsb0>()[0..32].clone_from_bitslice(bits);
+                upper.view_bits_mut::<bitvec::order::Lsb0>()[0..(length - 32)].clone_from_bitslice(&bits[32..]);
+                Ok(AmlValue::Integer((upper as u64) << 32 + (lower as u64)))
             } else {
-                let mut value = 0u64;
+                let mut value = 0u32;
                 value.view_bits_mut::<bitvec::order::Lsb0>()[0..length].clone_from_bitslice(bits);
-                Ok(AmlValue::Integer(value))
+                Ok(AmlValue::Integer(value as u64))
             }
         } else {
             Err(AmlError::IncompatibleValueConversion { current: self.type_of(), target: AmlType::BufferField })
@@ -549,7 +566,7 @@ impl AmlValue {
                     bitslice[offset..(offset + bits_to_copy)]
                         .copy_from_bitslice(&value.to_le_bytes().view_bits()[..(bits_to_copy as usize)]);
                     // Zero extend to the end of the buffer field
-                    bitslice[(offset + bits_to_copy)..(offset + length)].set_all(false);
+                    bitslice[(offset + bits_to_copy)..(offset + length)].fill(false);
                     Ok(())
                 }
                 AmlValue::Boolean(value) => {
@@ -569,7 +586,7 @@ impl AmlValue {
                     bitslice[offset..(offset + bits_to_copy)]
                         .copy_from_bitslice(&value_data.view_bits()[..(bits_to_copy as usize)]);
                     // Zero extend to the end of the buffer field
-                    bitslice[(offset + bits_to_copy)..(offset + length)].set_all(false);
+                    bitslice[(offset + bits_to_copy)..(offset + length)].fill(false);
                     Ok(())
                 }
                 _ => Err(AmlError::TypeCannotBeWrittenToBufferField(value.type_of())),

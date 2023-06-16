@@ -1,9 +1,10 @@
 use crate::{
-    name_object::{name_string, super_name, target},
+    misc::debug_obj,
+    name_object::{name_string, simple_name, super_name, target},
     opcode::{self, opcode},
     parser::{choice, comment_scope, n_of, take, take_to_end_of_pkglength, try_with_context, Parser, Propagate},
     pkg_length::pkg_length,
-    term_object::{data_ref_object, term_arg},
+    term_object::{data_ref_object, term_arg, def_cond_ref_of},
     value::{AmlType, AmlValue, Args},
     AmlError,
     DebugVerbosity,
@@ -48,13 +49,16 @@ where
             def_l_less(),
             def_l_less_equal(),
             def_l_not_equal(),
+            def_l_and(),
             def_l_or(),
             def_mid(),
+            def_object_type(),
             def_package(),
             def_shift_left(),
             def_shift_right(),
             def_store(),
             def_to_integer(),
+            def_cond_ref_of(),
             method_invocation() // XXX: this must always appear last. See how we have to parse it to see why.
         ),
     )
@@ -303,6 +307,27 @@ where
         .map(|((), result)| Ok(result))
 }
 
+fn def_l_and<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefLAnd := 0x90 Operand Operand
+     * Operand := TermArg => Integer
+     */
+    opcode(opcode::DEF_L_AND_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefLOr",
+            term_arg().then(term_arg()).map_with_context(|(left_arg, right_arg), context| {
+                let left = try_with_context!(context, left_arg.as_bool());
+                let right = try_with_context!(context, right_arg.as_bool());
+                (Ok(AmlValue::Boolean(left && right)), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
 fn def_l_or<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
 where
     'c: 'a,
@@ -496,6 +521,77 @@ where
                     try_with_context!(context, context.store(target, result.clone()));
                     (Ok(result), context)
                 },
+            ),
+        ))
+        .map(|((), result)| Ok(result))
+}
+
+pub fn def_object_type<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefObjectType := 0x8e <SimpleName | DebugObj | DefRefOf | DefDerefOf | DefIndex>
+     *
+     * Returns an integer representing the type of an AML object. If executed on an object that is a reference to a
+     * value (e.g. produced by `Alias`, `RefOf`, or `Index`), the type of the base object is returned. For typeless
+     * objects, such as scopes, a type of `0 - Uninitialized` is returned.
+     *
+     *    0 = Uninitialized
+     *    1 = Integer
+     *    2 = String
+     *    3 = Buffer
+     *    4 = Package
+     *    5 = Field Unit
+     *    6 = Device
+     *    7 = Event
+     *    8 = Method
+     *    9 = Mutex
+     *    10 = Operation Region
+     *    11 = Power Resource
+     *    12 = Processor
+     *    13 = Thermal Zone
+     *    14 = Buffer Field
+     *    15 = Reserved
+     *    16 = Debug Object
+     *    >16 = *Reserved*
+     */
+    // TODO: this doesn't correctly handle taking the type of a namespace node (e.g. `\_SB`), but I'm not sure any
+    // other implementations do either?
+    opcode(opcode::DEF_OBJECT_TYPE_OP)
+        .then(comment_scope(
+            DebugVerbosity::AllScopes,
+            "DefObjectType",
+            choice!(
+                simple_name().map_with_context(|target, context| {
+                    let value = try_with_context!(context, context.read_target(&target));
+                    let typ = match value.type_of() {
+                        AmlType::Uninitialized => 0,
+                        AmlType::Integer => 1,
+                        AmlType::String => 2,
+                        AmlType::Buffer => 3,
+                        AmlType::RawDataBuffer => 3, // TODO: not sure if this is correct
+                        AmlType::Package => 4,
+                        AmlType::FieldUnit => 5,
+                        AmlType::Device => 6,
+                        AmlType::Event => 7,
+                        AmlType::Method => 8,
+                        AmlType::Mutex => 9,
+                        AmlType::OpRegion => 10,
+                        AmlType::PowerResource => 11,
+                        AmlType::Processor => 12,
+                        AmlType::ThermalZone => 13,
+                        AmlType::BufferField => 14,
+                        AmlType::DebugObject => 16,
+
+                        // TODO: what to do with this?
+                        AmlType::DdbHandle => 0,
+                        AmlType::ObjReference => todo!(),
+                    };
+
+                    (Ok(AmlValue::Integer(typ)), context)
+                }),
+                debug_obj().map(|()| Ok(AmlValue::Integer(16)))
             ),
         ))
         .map(|((), result)| Ok(result))

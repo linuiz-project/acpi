@@ -1,7 +1,7 @@
 use crate::{
     expression::{def_buffer, def_package, expression_opcode},
     misc::{arg_obj, local_obj},
-    name_object::{name_seg, name_string},
+    name_object::{name_seg, name_string, target, Target},
     namespace::{AmlName, LevelType},
     opcode::{self, ext_opcode, opcode},
     parser::{
@@ -77,7 +77,7 @@ where
     /*
      * NamespaceModifierObj := DefAlias | DefName | DefScope
      */
-    choice!(def_name(), def_scope())
+    choice!(def_alias(), def_name(), def_scope())
 }
 
 pub fn named_obj<'a, 'c>() -> impl Parser<'a, 'c, ()>
@@ -130,6 +130,29 @@ where
                 try_with_context!(
                     context,
                     context.namespace.add_value_at_resolved_path(name, &context.current_scope, data_ref_object)
+                );
+                (Ok(()), context)
+            }),
+        ))
+        .discard_result()
+}
+
+pub fn def_alias<'a, 'c>() -> impl Parser<'a, 'c, ()>
+where
+    'c: 'a,
+{
+    /*
+     * DefAlias := 0x06 NameString NameString
+     * The second name refers to the same object as the first
+     */
+    opcode(opcode::DEF_ALIAS_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefAlias",
+            name_string().then(name_string()).map_with_context(|(target, alias), context| {
+                try_with_context!(
+                    context,
+                    context.namespace.add_alias_at_resolved_path(alias, &context.current_scope, target)
                 );
                 (Ok(()), context)
             }),
@@ -826,6 +849,32 @@ where
             }),
         ))
         .discard_result()
+}
+
+pub fn def_cond_ref_of<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>
+where
+    'c: 'a,
+{
+    /*
+     * DefCondRefOf := ExtOpPrefix 0x12 NameString Target => boolean
+     */
+    ext_opcode(opcode::EXT_DEF_COND_REF_OF_OP)
+        .then(comment_scope(
+            DebugVerbosity::Scopes,
+            "DefCondRefOf",
+            name_string().then(target()).map_with_context(|(source, target), context| {
+                let handle = context.namespace.search(&source, &context.current_scope);
+                let result = AmlValue::Boolean(handle.is_ok());
+                if let Ok((_name, _handle)) = handle {
+                    match target {
+                        Target::Null => { /* just return the result of the check */ }
+                        _ => {return (Err(Propagate::Err(AmlError::Unimplemented)), context) },
+                    }
+                }
+                (Ok(result), context)
+            }),
+        ))
+        .map(|((), result)| Ok(result))
 }
 
 pub fn term_arg<'a, 'c>() -> impl Parser<'a, 'c, AmlValue>

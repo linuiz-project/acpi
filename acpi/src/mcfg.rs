@@ -109,7 +109,7 @@ unsafe impl AcpiTable for Mcfg {
 impl Mcfg {
     /// Returns a slice containing each of the entries in the MCFG table. Where possible, `PlatformInfo.interrupt_model` should
     /// be enumerated instead.
-    fn entries(&self) -> &[McfgEntry] {
+    pub fn entries(&self) -> &[McfgEntry] {
         let length = self.header.length as usize - mem::size_of::<Mcfg>();
 
         // Intentionally round down in case length isn't an exact multiple of McfgEntry size
@@ -132,9 +132,9 @@ impl core::fmt::Debug for Mcfg {
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C, packed)]
 pub struct McfgEntry {
-    base_address: u64,
-    pci_segment_group: u16,
-    bus_number_start: u8,
-    bus_number_end: u8,
+    pub base_address: u64,
+    pub pci_segment_group: u16,
+    pub bus_number_start: u8,
+    pub bus_number_end: u8,
     _reserved: u32,
 }

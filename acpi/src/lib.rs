@@ -72,14 +72,17 @@ mod managed_slice;
 pub use managed_slice::*;
 
 #[cfg(feature = "allocator_api")]
-pub use crate::platform::{interrupt::InterruptModel, PlatformInfo};
-#[cfg(feature = "allocator_api")]
 pub mod platform;
+#[cfg(feature = "allocator_api")]
+pub use crate::platform::{interrupt::InterruptModel, PlatformInfo};
 
 #[cfg(feature = "allocator_api")]
 extern crate alloc;
 
-pub use crate::{fadt::PowerProfile, hpet::HpetInfo, madt::MadtError, mcfg::PciConfigRegions};
+pub use fadt::PowerProfile;
+pub use hpet::HpetInfo;
+pub use madt::MadtError;
+pub use mcfg::PciConfigRegions;
 pub use rsdp::{
     handler::{AcpiHandler, PhysicalMapping},
     RsdpError,
@@ -176,40 +179,64 @@ where
     ///
     /// ### Safety: Caller must ensure that the provided mapping is a fully validated RSDP.
     pub unsafe fn from_validated_rsdp(handler: H, rsdp_mapping: PhysicalMapping<H, Rsdp>) -> AcpiResult<Self> {
-        let revision = rsdp_mapping.revision();
+        macro_rules! read_root_table {
+            ($signature_name:ident, $address_getter:ident) => {{
+                #[repr(transparent)]
+                struct RootTable {
+                    header: SdtHeader,
+                }
 
-        if revision == 0 {
+                unsafe impl AcpiTable for RootTable {
+                    const SIGNATURE: Signature = Signature::$signature_name;
+
+                    fn header(&self) -> &SdtHeader {
+                        &self.header
+                    }
+                }
+
+                // Unmap RSDP as soon as possible
+                let table_phys_start = rsdp_mapping.$address_getter() as usize;
+                drop(rsdp_mapping);
+
+                // Map and validate root table
+                // SAFETY: Addresses from a validated `RSDP` are also guaranteed to be valid.
+                let table_mapping = unsafe { read_table::<_, RootTable>(handler.clone(), table_phys_start) }?;
+
+                // Convert `table_mapping` to header mapping for storage
+                // Avoid requesting table unmap twice (from both original and converted `table_mapping`s)
+                let table_mapping = mem::ManuallyDrop::new(table_mapping);
+                // SAFETY: `SdtHeader` is equivalent to `Sdt` memory-wise
+                let table_mapping = unsafe {
+                    PhysicalMapping::new(
+                        table_mapping.physical_start(),
+                        table_mapping.virtual_start().cast::<SdtHeader>(),
+                        table_mapping.region_length(),
+                        table_mapping.mapped_length(),
+                        handler.clone(),
+                    )
+                };
+
+                table_mapping
+            }};
+        }
+
+        let revision = rsdp_mapping.revision();
+        let root_table_mapping = if revision == 0 {
             /*
              * We're running on ACPI Version 1.0. We should use the 32-bit RSDT address.
              */
 
-            // Safety: Addresses from a validated `RSDP` are also guaranteed to be valid.
-            let rsdt_mapping: PhysicalMapping<H, SdtHeader> = unsafe {
-                handler.map_physical_region::<SdtHeader>(
-                    rsdp_mapping.rsdt_address() as usize,
-                    core::mem::size_of::<SdtHeader>(),
-                )
-            };
-            rsdt_mapping.validate(Signature::RSDT)?;
-
-            Ok(Self { mapping: rsdt_mapping, revision, handler })
+            read_root_table!(RSDT, rsdt_address)
         } else {
             /*
              * We're running on ACPI Version 2.0+. We should use the 64-bit XSDT address, truncated
              * to 32 bits on x86.
              */
 
-            // Safety: Addresses from a validated `RSDP` are also guaranteed to be valid.
-            let xsdt_mapping: PhysicalMapping<H, SdtHeader> = unsafe {
-                handler.map_physical_region::<SdtHeader>(
-                    rsdp_mapping.xsdt_address() as usize,
-                    core::mem::size_of::<SdtHeader>(),
-                )
-            };
-            xsdt_mapping.validate(Signature::XSDT)?;
+            read_root_table!(XSDT, xsdt_address)
+        };
 
-            Ok(Self { mapping: xsdt_mapping, revision, handler })
-        }
+        Ok(Self { mapping: root_table_mapping, revision, handler })
     }
 
     /// The ACPI revision of the tables enumerated by this structure.
@@ -218,56 +245,68 @@ where
         self.revision
     }
 
+    /// Constructs a [`TablesPhysPtrsIter`] over this table.
+    fn tables_phys_ptrs(&self) -> TablesPhysPtrsIter<'_> {
+        // SAFETY: The virtual address of the array of pointers follows the virtual address of the table in memory.
+        let ptrs_virt_start = unsafe { self.mapping.virtual_start().as_ptr().add(1).cast::<u8>() };
+        let ptrs_bytes_len = self.mapping.region_length() - mem::size_of::<SdtHeader>();
+        // SAFETY: `ptrs_virt_start` points to an array of `ptrs_bytes_len` bytes that lives as long as `self`.
+        let ptrs_bytes = unsafe { core::slice::from_raw_parts(ptrs_virt_start, ptrs_bytes_len) };
+        let ptr_size = if self.revision == 0 {
+            4 // RSDT entry size
+        } else {
+            8 // XSDT entry size
+        };
+
+        ptrs_bytes.chunks(ptr_size).map(|ptr_bytes_src| {
+            // Construct a native pointer using as many bytes as required from `ptr_bytes_src` (note that ACPI is
+            // little-endian)
+
+            let mut ptr_bytes_dst = [0; mem::size_of::<usize>()];
+            let common_ptr_size = usize::min(mem::size_of::<usize>(), ptr_bytes_src.len());
+            ptr_bytes_dst[..common_ptr_size].copy_from_slice(&ptr_bytes_src[..common_ptr_size]);
+
+            usize::from_le_bytes(ptr_bytes_dst) as *const SdtHeader
+        })
+    }
+
     /// Searches through the ACPI table headers and attempts to locate the table with a matching `T::SIGNATURE`.
     pub fn find_table<T: AcpiTable>(&self) -> AcpiResult<PhysicalMapping<H, T>> {
-        use core::mem::size_of;
+        self.tables_phys_ptrs()
+            .find_map(|table_phys_ptr| {
+                // SAFETY: Table guarantees its contained addresses to be valid.
+                match unsafe { read_table(self.handler.clone(), table_phys_ptr as usize) } {
+                    Ok(table_mapping) => Some(table_mapping),
+                    Err(AcpiError::SdtInvalidSignature(_)) => None,
+                    Err(e) => {
+                        log::warn!(
+                            "Found invalid {} table at physical address {:p}: {:?}",
+                            T::SIGNATURE,
+                            table_phys_ptr,
+                            e
+                        );
 
-        if self.revision == 0 {
-            let num_tables = ((self.mapping.length as usize) - size_of::<SdtHeader>()) / size_of::<u32>();
-            // Safety: Table pointer is known-good for these offsets and types.
-            let tables_base = unsafe { self.mapping.virtual_start().as_ptr().add(1).cast::<u32>() };
-
-            for offset in 0..num_tables {
-                // Safety: Table pointer is known-good for these offsets and types.
-                let sdt_header_address = unsafe { tables_base.add(offset).read_unaligned() } as usize;
-
-                // Safety: `RSDT` guarantees its contained addresses to be valid.
-                let table_result = unsafe { read_table(self.handler.clone(), sdt_header_address) };
-                if table_result.is_ok() {
-                    return table_result;
+                        None
+                    }
                 }
-            }
-        } else {
-            let num_tables = ((self.mapping.length as usize) - size_of::<SdtHeader>()) / size_of::<u64>();
-            // Safety: Table pointer is known-good for these offsets and types.
-            let tables_base = unsafe { self.mapping.virtual_start().as_ptr().add(1).cast::<u64>() };
-
-            for offset in 0..num_tables {
-                // Safety: Table pointer is known-good for these offsets and types.
-                let sdt_header_address = unsafe { tables_base.add(offset).read_unaligned() } as usize;
-
-                // Safety: `XSDT` guarantees its contained addresses to be valid.
-                let table_result = unsafe { read_table(self.handler.clone(), sdt_header_address) };
-                if table_result.is_ok() {
-                    return table_result;
-                }
-            }
-        }
-
-        Err(AcpiError::TableMissing(T::SIGNATURE))
+            })
+            .ok_or(AcpiError::TableMissing(T::SIGNATURE))
     }
 
     /// Finds and returns the DSDT AML table, if it exists.
     pub fn dsdt(&self) -> AcpiResult<AmlTable> {
         self.find_table::<fadt::Fadt>().and_then(|fadt| {
-            struct Dsdt;
+            #[repr(transparent)]
+            struct Dsdt {
+                header: SdtHeader,
+            }
+
             // Safety: Implementation properly represents a valid DSDT.
             unsafe impl AcpiTable for Dsdt {
                 const SIGNATURE: Signature = Signature::DSDT;
 
-                fn header(&self) -> &sdt::SdtHeader {
-                    // Safety: DSDT will always be valid for an SdtHeader at its `self` pointer.
-                    unsafe { &*(self as *const Self as *const sdt::SdtHeader) }
+                fn header(&self) -> &SdtHeader {
+                    &self.header
                 }
             }
 
@@ -280,17 +319,7 @@ where
 
     /// Iterates through all of the SSDT tables.
     pub fn ssdts(&self) -> SsdtIterator<H> {
-        let header_ptrs_base_ptr =
-            unsafe { self.mapping.virtual_start().as_ptr().add(1).cast::<*const SdtHeader>() };
-        let header_ptr_count = ((self.mapping.length as usize) - mem::size_of::<SdtHeader>())
-            / core::mem::size_of::<*const *const SdtHeader>();
-
-        SsdtIterator {
-            current_sdt_ptr: header_ptrs_base_ptr,
-            remaining: header_ptr_count,
-            handler: self.handler.clone(),
-            marker: core::marker::PhantomData,
-        }
+        SsdtIterator { tables_phys_ptrs: self.tables_phys_ptrs(), handler: self.handler.clone() }
     }
 
     /// Convenience method for contructing a [`PlatformInfo`](crate::platform::PlatformInfo). This is one of the
@@ -299,7 +328,7 @@ where
     #[cfg(feature = "allocator_api")]
     pub fn platform_info_in<A>(&self, allocator: A) -> AcpiResult<PlatformInfo<A>>
     where
-        A: core::alloc::Allocator + Copy,
+        A: core::alloc::Allocator + Clone,
     {
         PlatformInfo::new_in(self, allocator)
     }
@@ -314,6 +343,9 @@ pub struct Sdt {
     /// Whether this SDT has been validated. This is set to `true` the first time it is mapped and validated.
     pub validated: bool,
 }
+
+/// An iterator over the physical table addresses in an RSDT or XSDT.
+type TablesPhysPtrsIter<'t> = core::iter::Map<core::slice::Chunks<'t, u8>, fn(&[u8]) -> *const SdtHeader>;
 
 #[derive(Debug)]
 pub struct AmlTable {
@@ -339,87 +371,59 @@ unsafe fn read_table<H: AcpiHandler, T: AcpiTable>(
     address: usize,
 ) -> AcpiResult<PhysicalMapping<H, T>> {
     // Attempt to peek at the SDT header to correctly enumerate the entire table.
-    // Safety: `address` needs to be valid for the size of `SdtHeader`, or the ACPI tables are malformed (not a software issue).
-    let mapping = unsafe { handler.map_physical_region::<SdtHeader>(address, core::mem::size_of::<SdtHeader>()) };
-    mapping.validate(T::SIGNATURE)?;
 
-    // If possible (if the existing mapping covers enough memory), resuse the existing physical mapping.
-    // This allows allocators/memory managers that map in chunks larger than `size_of::<SdtHeader>()` to be used more efficiently.
-    if mapping.mapped_length() >= (mapping.length as usize) {
-        // Safety: Pointer is known non-null.
-        let virtual_start =
-            unsafe { core::ptr::NonNull::new_unchecked(mapping.virtual_start().as_ptr() as *mut _) };
+    // SAFETY: `address` needs to be valid for the size of `SdtHeader`, or the ACPI tables are malformed (not a
+    // software issue).
+    let header_mapping = unsafe { handler.map_physical_region::<SdtHeader>(address, mem::size_of::<SdtHeader>()) };
 
-        // Safety: Mapping is known-good and validated.
-        Ok(unsafe {
-            PhysicalMapping::new(
-                mapping.physical_start(),
-                virtual_start,
-                mapping.region_length(),
-                mapping.mapped_length(),
-                handler.clone(),
-            )
-        })
-    } else {
-        let sdt_length = mapping.length;
-        // Drop the old mapping here, to ensure it's unmapped in software before requesting an overlapping mapping.
-        drop(mapping);
-
-        // Safety: Address and length are already known-good.
-        Ok(unsafe { handler.map_physical_region(address, sdt_length as usize) })
-    }
+    SdtHeader::validate_lazy(header_mapping, handler)
 }
 
 /// Iterator that steps through all of the tables, and returns only the SSDTs as `AmlTable`s.
-pub struct SsdtIterator<'a, H>
+pub struct SsdtIterator<'t, H>
 where
     H: AcpiHandler,
 {
-    current_sdt_ptr: *const *const SdtHeader,
-    remaining: usize,
+    tables_phys_ptrs: TablesPhysPtrsIter<'t>,
     handler: H,
-    marker: core::marker::PhantomData<&'a ()>,
 }
 
-impl<'a, H> Iterator for SsdtIterator<'a, H>
+impl<'t, H> Iterator for SsdtIterator<'t, H>
 where
     H: AcpiHandler,
 {
     type Item = AmlTable;
 
     fn next(&mut self) -> Option<Self::Item> {
-        struct Ssdt;
-        // Safety: Implementation properly represents a valid SSDT.
+        #[repr(transparent)]
+        struct Ssdt {
+            header: SdtHeader,
+        }
+
+        // SAFETY: Implementation properly represents a valid SSDT.
         unsafe impl AcpiTable for Ssdt {
             const SIGNATURE: Signature = Signature::SSDT;
 
-            fn header(&self) -> &sdt::SdtHeader {
-                // Safety: DSDT will always be valid for an SdtHeader at its `self` pointer.
-                unsafe { &*(self as *const Self as *const sdt::SdtHeader) }
+            fn header(&self) -> &SdtHeader {
+                &self.header
             }
         }
 
-        if self.remaining == 0 {
-            None
-        } else {
-            loop {
-                // Attempt to peek at the SDT header to correctly enumerate the entire table.
-                // Safety: `address` needs to be valid for the size of `SdtHeader`, or the ACPI tables are malformed (not a software issue).
-                let sdt_header = unsafe {
-                    self.handler.map_physical_region::<SdtHeader>(
-                        self.current_sdt_ptr.read() as usize,
-                        core::mem::size_of::<SdtHeader>(),
-                    )
-                };
+        // Borrow single field for closure to avoid immutable reference to `self` that inhibits `find_map`
+        let handler = &self.handler;
 
-                self.remaining -= 1;
+        // Consume iterator until next valid SSDT and return the latter
+        self.tables_phys_ptrs.find_map(|table_phys_ptr| {
+            // SAFETY: Table guarantees its contained addresses to be valid.
+            match unsafe { read_table::<_, Ssdt>(handler.clone(), table_phys_ptr as usize) } {
+                Ok(ssdt_mapping) => Some(AmlTable::new(ssdt_mapping.physical_start(), ssdt_mapping.header.length)),
+                Err(AcpiError::SdtInvalidSignature(_)) => None,
+                Err(e) => {
+                    log::warn!("Found invalid SSDT at physical address {:p}: {:?}", table_phys_ptr, e);
 
-                if sdt_header.validate(Ssdt::SIGNATURE).is_err() {
-                    continue;
-                } else {
-                    return Some(AmlTable { address: sdt_header.physical_start(), length: sdt_header.length });
+                    None
                 }
             }
-        }
+        })
     }
 }
